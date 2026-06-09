@@ -31,11 +31,19 @@ import (
 // criem múltiplas mensagens (idempotency end-to-end).
 type SendRequest struct {
 	Channel   string                 `json:"channel"`   // "email" | "telegram" | "webhook"
-	Template  string                 `json:"template"`  // ex.: "checkout_paid"
+	Template  string                 `json:"template"`  // ex.: "checkout_paid" — opcional se Subject+Body
 	To        SendRecipient          `json:"to"`        // destinatário por canal
 	Vars      map[string]interface{} `json:"vars"`      // dados pro template
 	AttemptID string                 `json:"attempt_id"`
 	Priority  string                 `json:"priority"`  // "high" | "normal" (informational)
+	// Raw email passthrough — usado pelo legacy EmailSender.Send do monolito,
+	// que já pré-renderiza assunto/corpo (ex.: CheckoutService.sendCheckoutEmail
+	// antes da Wave 3 migrar pra TemplatedEmailer). Quando Template está vazio
+	// E Subject+(HTMLBody OR TextBody) preenchidos, sender dispatch direto sem
+	// passar pelo renderer.
+	Subject  string `json:"subject,omitempty"`
+	HTMLBody string `json:"html_body,omitempty"`
+	TextBody string `json:"text_body,omitempty"`
 }
 
 // SendRecipient é o destinatário por canal. Email/Telegram são mutuamente
@@ -142,13 +150,28 @@ func (s *Service) Enqueue(ctx context.Context, req SendRequest) (string, error) 
 	}
 	id := s.IDGen()
 
-	varsJSON := []byte("{}")
-	if req.Vars != nil {
-		b, err := json.Marshal(req.Vars)
-		if err != nil {
-			return "", fmt.Errorf("marshal vars: %w", err)
+	// Raw passthrough: empacota Subject/HTMLBody/TextBody dentro de vars
+	// quando Template vazio. Schema do sender_outbox não tem colunas
+	// dedicadas — reservamos prefixo "_raw_" pra não colidir com vars de
+	// template real. renderEmail lê quando Template=="".
+	vars := req.Vars
+	if vars == nil {
+		vars = map[string]interface{}{}
+	}
+	if strings.TrimSpace(req.Template) == "" && req.Channel == "email" {
+		if s := strings.TrimSpace(req.Subject); s != "" {
+			vars["_raw_subject"] = s
 		}
-		varsJSON = b
+		if h := strings.TrimSpace(req.HTMLBody); h != "" {
+			vars["_raw_html"] = h
+		}
+		if t := strings.TrimSpace(req.TextBody); t != "" {
+			vars["_raw_text"] = t
+		}
+	}
+	varsJSON, err := json.Marshal(vars)
+	if err != nil {
+		return "", fmt.Errorf("marshal vars: %w", err)
 	}
 
 	row := OutboxRow{
@@ -196,8 +219,19 @@ func validateSendRequest(r SendRequest) error {
 	default:
 		return fmt.Errorf("unsupported channel %q", r.Channel)
 	}
+	// Template OR raw payload — pelo menos um. Sender suporta os 2 modos:
+	//   - template + vars (renderiza com helpers em templates/*.go)
+	//   - subject + html/text body raw (passthrough — quando monolito já
+	//     tem o email pré-renderizado, ex.: legacy EmailSender.Send do
+	//     checkout antes da Wave 3 migrar tudo pra template)
 	if strings.TrimSpace(r.Template) == "" {
-		return errors.New("template required")
+		if r.Channel == "email" {
+			if strings.TrimSpace(r.Subject) == "" || (strings.TrimSpace(r.HTMLBody) == "" && strings.TrimSpace(r.TextBody) == "") {
+				return errors.New("template or (subject + html_body/text_body) required for email")
+			}
+		} else {
+			return errors.New("template required for non-email channels")
+		}
 	}
 	return nil
 }

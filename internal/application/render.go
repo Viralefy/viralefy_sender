@@ -19,6 +19,27 @@ import (
 //   - "proof_rejected"  — comprovante recusado
 func renderEmail(row OutboxRow) (subject, html, text string, err error) {
 	switch row.Template {
+	case "":
+		// Raw passthrough — monolith pré-renderizou subject + body e
+		// stashou em vars._raw_*. Não há rendering a fazer, só leitura.
+		var raw map[string]interface{}
+		if err = unmarshalVars(row.Vars, &raw); err != nil {
+			return
+		}
+		if s, _ := raw["_raw_subject"].(string); s != "" {
+			subject = s
+		}
+		if h, _ := raw["_raw_html"].(string); h != "" {
+			html = h
+		}
+		if t, _ := raw["_raw_text"].(string); t != "" {
+			text = t
+		}
+		if subject == "" || (html == "" && text == "") {
+			err = fmt.Errorf("raw email passthrough: missing subject or body")
+		}
+		return
+
 	case "checkout":
 		var d templates.CheckoutEmailData
 		if err = unmarshalVars(row.Vars, &d); err != nil {
