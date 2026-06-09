@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/getsentry/sentry-go v0.46.2
 	github.com/go-chi/chi/v5 v5.2.1
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.4
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0
 )

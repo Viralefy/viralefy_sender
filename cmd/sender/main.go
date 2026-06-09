@@ -1,13 +1,19 @@
 // Command sender é o entrypoint do microservice viralefy_sender.
 //
-// Sobe na rede loopback (default 127.0.0.1:8082), expõe /internal/health
-// + /internal/send (stub 501 por ora), e roda um tick do outbox a cada 30s
-// pra drenar a fila persistente sender_outbox. Migrations são aplicadas no
-// boot — service é dono das tabelas sender_*, telegram_*.
+// Sobe na rede loopback (default 127.0.0.1:8082), expõe:
+//
+//	GET  /internal/health
+//	POST /internal/v1/send                 (X-Internal-Token)
+//	POST /internal/v1/telegram/webhook     (X-Telegram-Bot-Api-Secret-Token)
+//
+// O tick do outbox roda a cada 30s (configurável via outboxTickInterval),
+// puxa batches de até 50 rows com FOR UPDATE SKIP LOCKED, dispatcha por
+// canal e aplica backoff exponencial (30s, 5m, 1h, 6h, 24h) até 5 tentativas
+// — conforme §2 do PHASE-8.
 //
 // Sentry/OTel/slog seguem o mesmo padrão do viralefy_api pra log/trace ficar
 // homogêneo no Loki/Tempo (tag service=viralefy-sender). Quando SENTRY_DSN
-// está vazio, o sentry-go vira no-op transparente — não precisa de guard.
+// está vazio, o sentry-go vira no-op transparente.
 package main
 
 import (
@@ -17,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,12 +31,13 @@ import (
 
 	"github.com/Viralefy/viralefy_sender/internal/application"
 	"github.com/Viralefy/viralefy_sender/internal/config"
+	"github.com/Viralefy/viralefy_sender/internal/infrastructure/external/email"
+	"github.com/Viralefy/viralefy_sender/internal/infrastructure/external/telegram"
 	"github.com/Viralefy/viralefy_sender/internal/infrastructure/persistence/postgres"
 	httphandler "github.com/Viralefy/viralefy_sender/internal/interface/http"
 )
 
 // outboxTickInterval — alinhado ao §2 do PHASE-8 (retry tick a cada 30s).
-// Mantemos como const pra ficar grep-able quando o Wave 2 tunar o valor.
 const outboxTickInterval = 30 * time.Second
 
 func main() {
@@ -49,9 +57,6 @@ func main() {
 	)
 	slog.SetDefault(logger)
 
-	// Sentry — no-op quando SENTRY_DSN vazio. Flush no shutdown gracioso.
-	// Mantemos init mesmo em dev pra que a stack trace chegue ao Sentry se
-	// o operador apontar o DSN sem rebuild.
 	if err := sentry.Init(sentry.ClientOptions{
 		Dsn:              os.Getenv("SENTRY_DSN"),
 		Release:          "viralefy-sender@" + version,
@@ -76,16 +81,53 @@ func main() {
 		log.Fatal("migrate:", err)
 	}
 
-	// Outbox tick — placeholder. No Wave 2 ganha repo + dispatcher real
-	// (email via Resend, telegram via Bot API, backoff exponencial).
+	// Email — Resend em prod, SMTP fallback, LogSender em dev.
+	emailSender := email.New(email.Config{
+		Provider:       cfg.EmailProvider,
+		Addr:           cfg.SMTPAddr,
+		User:           cfg.SMTPUser,
+		Pass:           cfg.SMTPPass,
+		From:           cfg.SMTPFrom,
+		FromName:       cfg.SMTPFromName,
+		ResendAPIKey:   cfg.ResendAPIKey,
+		ResendFrom:     cfg.ResendFrom,
+		ResendFromName: cfg.ResendFromName,
+		ResendBaseURL:  cfg.ResendBaseURL,
+	}, logger)
+
+	// Telegram bot — opcional. Sem token => bot=nil e Service trata como
+	// log-only no canal telegram. Suporte ao token cifrado (AES com
+	// TwoFAEncryptionKey + telegram_config no DB) fica pra Wave 3, quando
+	// o backoffice ganhar a tela de config; por ora carregamos TELEGRAM_BOT_TOKEN
+	// em claro do env (HML/dev).
+	var bot *telegram.Bot
+	if tok := strings.TrimSpace(cfg.TelegramBotToken); tok != "" {
+		bot = telegram.NewBot(tok, db.Pool(), logger)
+		logger.Info("telegram bot enabled")
+	} else {
+		logger.Info("telegram bot disabled (TELEGRAM_BOT_TOKEN empty)")
+	}
+
+	// Outbox Service — recebe repo + email + bot. Tick agora roda real.
 	outboxSvc := application.NewService(logger)
+	outboxSvc.Repo = postgres.NewOutboxRepo(db.Pool())
+	outboxSvc.Email = emailSender
+	if bot != nil {
+		outboxSvc.Bot = bot
+	}
+
 	tickCtx, tickCancel := context.WithCancel(context.Background())
 	defer tickCancel()
 	go runOutboxTick(tickCtx, outboxSvc, logger)
 
-	// HTTP router — /internal/health (livre) + /internal/send (501 stub
-	// atrás do InternalAuth). OTel middleware embutido no NewRouter.
-	router := httphandler.NewRouter(cfg.InternalSharedSecret)
+	// HTTP router — health + /internal/v1/send + /internal/v1/telegram/webhook.
+	router := httphandler.NewRouter(httphandler.Deps{
+		InternalSecret:        cfg.InternalSharedSecret,
+		Service:               outboxSvc,
+		Bot:                   bot,
+		TelegramWebhookSecret: cfg.TelegramWebhookSecret,
+		Logger:                logger,
+	})
 	addr := cfg.BindHost + ":" + cfg.Port
 	srv := &http.Server{
 		Addr:              addr,
@@ -112,9 +154,8 @@ func main() {
 }
 
 // runOutboxTick dispara Tick a cada outboxTickInterval até o ctx cancelar.
-// Erros do Tick (quando houver lógica real) precisam ser tratados internamente
-// — esta loop só agenda. Primeira execução é imediata pra acelerar feedback
-// no boot, depois respeita o ticker.
+// Erros do Tick são tratados internamente (loga + segue) — este loop só
+// agenda. Primeira execução é imediata pra acelerar feedback no boot.
 func runOutboxTick(ctx context.Context, svc *application.Service, logger *slog.Logger) {
 	logger.Info("outbox tick scheduled", "interval", outboxTickInterval.String())
 	t := time.NewTicker(outboxTickInterval)

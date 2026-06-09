@@ -37,11 +37,30 @@ type Config struct {
 	ResendFromName string
 	ResendBaseURL  string
 
+	// Email — provider override + SMTP fallback. EmailProvider="resend"
+	// usa o ResendSender; senão SMTP (se Addr setado); senão LogSender.
+	EmailProvider string
+	SMTPAddr      string
+	SMTPUser      string
+	SMTPPass      string
+	SMTPFrom      string
+	SMTPFromName  string
+
 	// Telegram (opcional — service sobe sem token; tick só dispara email).
 	// Token é cifrado AES-256 com TwoFAEncryptionKey antes de persistir;
 	// aqui carregamos o valor cifrado direto do env como fallback quando
 	// telegram_config ainda não foi populado pelo backoffice.
 	TelegramBotTokenEncrypted string
+
+	// TelegramBotToken — versão em claro, prioridade sobre o cifrado.
+	// Útil em HML/dev quando o operador não quer configurar AES key.
+	// Em prod o fluxo padrão é cifrado em telegram_config (DB).
+	TelegramBotToken string
+
+	// TelegramWebhookSecret — secret_token configurado via setWebhook.
+	// Telegram envia em todo request via X-Telegram-Bot-Api-Secret-Token.
+	// Vazio = aceitamos sem validação (só pra dev local, jamais em prod).
+	TelegramWebhookSecret string
 
 	// AES-256 (32 bytes) — mesma key do 2FA da API, reusada pra cifrar o bot
 	// token do Telegram em rest. Vazio = Telegram disabled.
@@ -59,6 +78,14 @@ func Load() (Config, error) {
 		ResendFromName:            getenv("RESEND_FROM_NAME", "Viralefy"),
 		ResendBaseURL:             getenv("RESEND_BASE_URL", "https://api.resend.com"),
 		TelegramBotTokenEncrypted: getenv("TELEGRAM_BOT_TOKEN_ENCRYPTED", ""),
+		TelegramBotToken:          getenv("TELEGRAM_BOT_TOKEN", ""),
+		TelegramWebhookSecret:     getenv("TELEGRAM_WEBHOOK_SECRET", ""),
+		EmailProvider:             getenv("EMAIL_PROVIDER", "resend"),
+		SMTPAddr:                  getenv("SMTP_ADDR", ""),
+		SMTPUser:                  getenv("SMTP_USER", ""),
+		SMTPPass:                  getenv("SMTP_PASS", ""),
+		SMTPFrom:                  getenv("SMTP_FROM", ""),
+		SMTPFromName:              getenv("SMTP_FROM_NAME", "Viralefy"),
 	}
 	if raw := strings.TrimSpace(getenv("TWOFA_ENCRYPTION_KEY", "")); raw != "" {
 		if b, err := parse2FAKey(raw); err == nil {
