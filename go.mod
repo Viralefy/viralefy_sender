@@ -1,10 +1,10 @@
 module github.com/Viralefy/viralefy_sender
 
-go 1.25.0
+go 1.26.4
 
 require (
 	github.com/getsentry/sentry-go v0.46.2
-	github.com/go-chi/chi/v5 v5.2.1
+	github.com/go-chi/chi/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/prometheus/client_golang v1.23.2
