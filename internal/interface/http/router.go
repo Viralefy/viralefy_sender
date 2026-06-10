@@ -10,6 +10,7 @@ import (
 
 	"github.com/Viralefy/viralefy_sender/internal/application"
 	"github.com/Viralefy/viralefy_sender/internal/infrastructure/external/telegram"
+	"github.com/Viralefy/viralefy_sender/internal/infrastructure/observability"
 )
 
 // Deps agrupa as dependências do router. Estabilizamos a forma agora pra
@@ -46,8 +47,14 @@ func NewRouter(d Deps) http.Handler {
 			}),
 		)
 	})
+	r.Use(observability.HTTPMiddleware)
 
 	r.Get("/internal/health", health)
+
+	// /internal/metrics: Prometheus scrape (loopback-only via bind 127.0.0.1:8082).
+	// Sem InternalAuth pra simplificar a config do Prometheus — o bind já
+	// restringe o acesso à interface privada.
+	r.Method(http.MethodGet, "/internal/metrics", observability.MetricsHandler())
 
 	// /internal/v1/send protegido por X-Internal-Token.
 	r.Group(func(g chi.Router) {

@@ -33,6 +33,7 @@ import (
 	"github.com/Viralefy/viralefy_sender/internal/config"
 	"github.com/Viralefy/viralefy_sender/internal/infrastructure/external/email"
 	"github.com/Viralefy/viralefy_sender/internal/infrastructure/external/telegram"
+	"github.com/Viralefy/viralefy_sender/internal/infrastructure/observability"
 	"github.com/Viralefy/viralefy_sender/internal/infrastructure/persistence/postgres"
 	httphandler "github.com/Viralefy/viralefy_sender/internal/interface/http"
 )
@@ -66,6 +67,10 @@ func main() {
 		logger.Warn("sentry init failed; continuing without it", "error", err.Error())
 	}
 	defer sentry.Flush(2 * time.Second)
+
+	// Prometheus collectors — registrados antes de servir requests pra
+	// /internal/metrics não 404ar enquanto handlers ainda warming up.
+	observability.InitMetrics()
 
 	// Postgres — boot falha rápido se DB não responde. Migrations isoladas
 	// no schema do sender (ver §4 do PHASE-8).
