@@ -29,7 +29,8 @@ type Deps struct {
 //
 // Rotas:
 //
-//	GET  /internal/health                         (sem auth, pra probes)
+//	GET  /internal/health                         (sem auth, pra probes — legacy)
+//	GET  /health                                  (sem auth, alias unificado — PHASE-10)
 //	POST /internal/v1/send                        (X-Internal-Token)
 //	POST /internal/v1/telegram/webhook            (X-Telegram-Bot-Api-Secret-Token)
 //
@@ -50,6 +51,11 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(observability.HTTPMiddleware)
 
 	r.Get("/internal/health", health)
+	// /health: alias unificado (PHASE-10 — 2026-06-11). Reusa o mesmo handler
+	// pra que viralefy-smoke + probes externos convirjam num único path em
+	// todos os services. /internal/health continua respondendo por backward
+	// compat (systemd probes, dashboards antigos).
+	r.Get("/health", health)
 
 	// /internal/metrics: Prometheus scrape (loopback-only via bind 127.0.0.1:8082).
 	// Sem InternalAuth pra simplificar a config do Prometheus — o bind já
